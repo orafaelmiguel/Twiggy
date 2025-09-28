@@ -20,8 +20,16 @@ tokio = { version = "1.0", features = ["full", "macros", "rt-multi-thread"] }
 directories = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time", "local-time"] }
+tracing-appender = "0.2"
 
 [dependencies.winapi]
 version = "0.3"
 features = ["winuser"]
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[[test]]
+name = "error_handling_tests"
+path = "tests/error_handling_tests.rs"

@@ -1,65 +1,88 @@
-use eframe::egui;
+pub mod error_dialog;
+
+#[allow(unused_imports)]
+pub use error_dialog::*;
 
 #[allow(dead_code)]
 pub struct CommitGraph {
+    pub zoom_level: f32,
+    pub scroll_offset: (f32, f32),
 }
 
 #[allow(dead_code)]
 impl CommitGraph {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            zoom_level: 1.0,
+            scroll_offset: (0.0, 0.0),
+        }
     }
-    
-    pub fn render(&mut self, ui: &mut egui::Ui) {
-        ui.label("Commit Graph - Coming Soon");
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.label("Commit Graph Component");
     }
 }
 
 #[allow(dead_code)]
 pub struct DiffViewer {
+    pub show_line_numbers: bool,
+    pub syntax_highlighting: bool,
 }
 
 #[allow(dead_code)]
 impl DiffViewer {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            show_line_numbers: true,
+            syntax_highlighting: true,
+        }
     }
-    
-    pub fn render(&mut self, ui: &mut egui::Ui) {
-        ui.label("Diff Viewer - Coming Soon");
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.label("Diff Viewer Component");
     }
 }
 
 #[allow(dead_code)]
 pub struct FileTree {
+    pub expanded_folders: Vec<String>,
+    pub selected_file: Option<String>,
 }
 
 #[allow(dead_code)]
 impl FileTree {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            expanded_folders: Vec::new(),
+            selected_file: None,
+        }
     }
-    
-    pub fn render(&mut self, ui: &mut egui::Ui) {
-        ui.label("File Tree - Coming Soon");
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.label("File Tree Component");
     }
 }
 
 #[allow(dead_code)]
 pub struct StatusBar {
+    pub current_branch: String,
+    pub uncommitted_changes: usize,
 }
 
 #[allow(dead_code)]
 impl StatusBar {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            current_branch: "main".to_string(),
+            uncommitted_changes: 0,
+        }
     }
-    
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Ready");
+            ui.label(format!("Branch: {}", self.current_branch));
             ui.separator();
-            ui.label("Phase 4: Modular Architecture");
+            ui.label(format!("Changes: {}", self.uncommitted_changes));
         });
     }
 }
