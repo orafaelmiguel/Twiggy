@@ -1,6 +1,6 @@
 use eframe::egui;
-use crate::{config::AppConfig, error::{Result, TwiggyError}, log_error};
-use std::time::Instant;
+use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error};
+use std::{time::Instant, path::PathBuf};
 
 #[derive(Debug)]
 pub struct ErrorState {
@@ -31,6 +31,9 @@ pub struct TwiggyApp {
     notifications: Vec<Notification>,
     last_config_save: Option<Instant>,
     performance_metrics: PerformanceMetrics,
+    show_settings: bool,
+    settings_tab: SettingsTab,
+    temp_config: AppConfig,
 }
 
 #[derive(Debug)]
@@ -49,6 +52,14 @@ pub enum NotificationType {
     Success,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsTab {
+    Window,
+    Theme,
+    Git,
+    Performance,
+}
+
 #[derive(Debug, Default)]
 pub struct PerformanceMetrics {
     pub frame_count: u64,
@@ -58,12 +69,16 @@ pub struct PerformanceMetrics {
 
 impl Default for TwiggyApp {
     fn default() -> Self {
+        let config = AppConfig::default();
         Self {
-            config: AppConfig::default(),
+            temp_config: config.clone(),
+            config,
             error_state: None,
             notifications: Vec::new(),
             last_config_save: None,
             performance_metrics: PerformanceMetrics::default(),
+            show_settings: false,
+            settings_tab: SettingsTab::Window,
         }
     }
 }
@@ -94,11 +109,14 @@ impl TwiggyApp {
         }
 
         let mut app = Self {
+            temp_config: config.clone(),
             config,
             error_state: None,
             notifications: Vec::new(),
             last_config_save: Some(Instant::now()),
             performance_metrics: PerformanceMetrics::default(),
+            show_settings: false,
+            settings_tab: SettingsTab::Window,
         };
 
         app.add_notification(
@@ -341,6 +359,187 @@ impl TwiggyApp {
     pub fn config_mut(&mut self) -> &mut AppConfig {
         &mut self.config
     }
+
+    fn render_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+
+        egui::Window::new("⚙️ Settings")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(600.0)
+            .default_height(500.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Window, "🪟 Window");
+                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Theme, "🎨 Theme");
+                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Git, "📦 Git");
+                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Performance, "⚡ Performance");
+                });
+
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    match self.settings_tab {
+                        SettingsTab::Window => self.render_window_settings(ui),
+                        SettingsTab::Theme => self.render_theme_settings(ui),
+                        SettingsTab::Git => self.render_git_settings(ui),
+                        SettingsTab::Performance => self.render_performance_settings(ui),
+                    }
+                });
+
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Save").clicked() {
+                        self.config = self.temp_config.clone();
+                        if let Err(e) = self.config.save() {
+                            self.handle_error(e);
+                        } else {
+                            self.add_notification(
+                                "Settings saved successfully".to_string(),
+                                NotificationType::Success,
+                                Some(3),
+                            );
+                        }
+                        self.show_settings = false;
+                    }
+
+                    if ui.button("🔄 Reset to Defaults").clicked() {
+                        self.temp_config = AppConfig::default();
+                    }
+
+                    if ui.button("❌ Cancel").clicked() {
+                        self.temp_config = self.config.clone();
+                        self.show_settings = false;
+                    }
+                });
+            });
+    }
+
+    fn render_window_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Window Settings");
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.window.width)
+                .clamp_range(400.0..=4000.0)
+                .suffix(" px"));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Height:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.window.height)
+                .clamp_range(300.0..=3000.0)
+                .suffix(" px"));
+        });
+
+        ui.checkbox(&mut self.temp_config.window.maximized, "Start maximized");
+        ui.checkbox(&mut self.temp_config.window.remember_position, "Remember window position");
+
+        if let (Some(x), Some(y)) = (self.temp_config.window.position_x, self.temp_config.window.position_y) {
+            ui.horizontal(|ui| {
+                ui.label("Position:");
+                ui.label(format!("({:.0}, {:.0})", x, y));
+            });
+        }
+    }
+
+    fn render_theme_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Theme Type:");
+            egui::ComboBox::from_label("")
+                .selected_text(format!("{:?}", self.temp_config.theme.theme_type))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.temp_config.theme.theme_type, ThemeType::Light, "Light");
+                    ui.selectable_value(&mut self.temp_config.theme.theme_type, ThemeType::Dark, "Dark");
+                    ui.selectable_value(&mut self.temp_config.theme.theme_type, ThemeType::System, "System");
+                });
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Font Size:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.theme.font_size)
+                .clamp_range(8.0..=32.0)
+                .suffix(" px"));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Dark Mode:");
+            ui.checkbox(&mut self.temp_config.theme.dark_mode, "");
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Accent Color:");
+            ui.text_edit_singleline(&mut self.temp_config.theme.accent_color);
+        });
+    }
+
+    fn render_git_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Default Clone Path:");
+            if let Some(ref mut path) = self.temp_config.git.default_clone_path {
+                ui.text_edit_singleline(&mut path.to_string_lossy().to_string());
+            } else {
+                let mut path_str = String::new();
+                if ui.text_edit_singleline(&mut path_str).changed() && !path_str.is_empty() {
+                    self.temp_config.git.default_clone_path = Some(PathBuf::from(path_str));
+                }
+            }
+            if ui.button("Browse").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.temp_config.git.default_clone_path = Some(path);
+                }
+            }
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Max Commits:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.git.max_commits)
+                .clamp_range(1..=10000));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Default Branch:");
+            ui.text_edit_singleline(&mut self.temp_config.git.default_branch);
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Auto Fetch:");
+            ui.checkbox(&mut self.temp_config.git.auto_fetch, "");
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Fetch Interval:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.git.fetch_interval_minutes)
+                .clamp_range(1..=1440)
+                .suffix(" min"));
+        });
+    }
+
+    fn render_performance_settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Performance Settings");
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Enable Caching:");
+            ui.checkbox(&mut self.temp_config.performance.enable_caching, "");
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Cache Size:");
+            ui.add(egui::DragValue::new(&mut self.temp_config.performance.cache_size_mb)
+                .clamp_range(1..=2048)
+                .suffix(" MB"));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("Background Operations:");
+            ui.checkbox(&mut self.temp_config.performance.background_operations, "");
+        });
+    }
 }
 
 impl eframe::App for TwiggyApp {
@@ -351,6 +550,7 @@ impl eframe::App for TwiggyApp {
         
         self.render_error_dialog(ctx);
         self.render_notifications(ctx);
+        self.render_settings_dialog(ctx);
         
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -392,7 +592,12 @@ impl eframe::App for TwiggyApp {
                         );
                     }
                     
-                    if ui.button("⚙️ Reset Config").clicked() {
+                    if ui.button("⚙️ Settings").clicked() {
+                        self.temp_config = self.config.clone();
+                        self.show_settings = true;
+                    }
+                    
+                    if ui.button("🔄 Reset Config").clicked() {
                         if let Err(e) = self.config.reset_to_defaults() {
                             self.handle_error(e);
                         } else {

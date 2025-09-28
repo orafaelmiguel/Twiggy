@@ -27,10 +27,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     tracing::info!("Launching GUI application");
     
+    let mut viewport_builder = egui::ViewportBuilder::default()
+        .with_inner_size([app.config().window.width, app.config().window.height])
+        .with_min_inner_size([800.0, 600.0]);
+    
+    if app.config().window.maximized {
+        viewport_builder = viewport_builder.with_maximized(true);
+    }
+    
+    if app.config().window.remember_position {
+        if let (Some(x), Some(y)) = (app.config().window.position_x, app.config().window.position_y) {
+            viewport_builder = viewport_builder.with_position([x, y]);
+        }
+    }
+    
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0]),
+        viewport: viewport_builder,
         ..Default::default()
     };
     
