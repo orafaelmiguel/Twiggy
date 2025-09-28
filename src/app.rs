@@ -402,6 +402,7 @@ impl TwiggyApp {
                                 NotificationType::Success,
                                 Some(3),
                             );
+                            ctx.request_repaint();
                         }
                         self.show_settings = false;
                     }
@@ -540,13 +541,77 @@ impl TwiggyApp {
             ui.checkbox(&mut self.temp_config.performance.background_operations, "");
         });
     }
+
+    fn apply_theme_to_context(&self, ctx: &egui::Context) {
+        let mut visuals = if self.config.theme.dark_mode || 
+            (self.config.theme.theme_type == ThemeType::System && self.is_system_dark_mode()) {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+
+        if let Ok(color) = self.parse_hex_color(&self.config.theme.accent_color) {
+            visuals.selection.bg_fill = color;
+            visuals.hyperlink_color = color;
+        }
+
+        ctx.set_visuals(visuals);
+    }
+
+    fn apply_window_settings(&self, _frame: &mut eframe::Frame) {
+        // Window settings are applied at startup in main.rs
+        // Runtime window resizing is handled by the user directly
+        // This method is kept for future eframe API compatibility
+    }
+
+    fn is_system_dark_mode(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+            if let Ok(output) = Command::new("reg")
+                .args(&["query", "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "/v", "AppsUseLightTheme"])
+                .output() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                return output_str.contains("0x0");
+            }
+        }
+        
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            if let Ok(output) = Command::new("defaults")
+                .args(&["read", "-g", "AppleInterfaceStyle"])
+                .output() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                return output_str.trim() == "Dark";
+            }
+        }
+        
+        false
+    }
+
+    fn parse_hex_color(&self, hex: &str) -> std::result::Result<egui::Color32, String> {
+        let hex = hex.trim_start_matches('#');
+        if hex.len() != 6 {
+            return Err("Invalid hex color length".to_string());
+        }
+        
+        let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| "Invalid red component".to_string())?;
+        let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| "Invalid green component".to_string())?;
+        let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "Invalid blue component".to_string())?;
+        
+        Ok(egui::Color32::from_rgb(r, g, b))
+    }
 }
 
 impl eframe::App for TwiggyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_performance_metrics();
         self.auto_save_config_if_needed();
         self.cleanup_old_notifications();
+        
+        self.apply_theme_to_context(ctx);
+        self.apply_window_settings(frame);
         
         self.render_error_dialog(ctx);
         self.render_notifications(ctx);
