@@ -1,19 +1,22 @@
-mod app;
-mod ui;
+use std::process;
 
-use app::MainApp;
+fn main() {
+    match run() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+    }
+}
 
-fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([1280.0, 720.0]),
-        ..Default::default()
-    };
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🌿 Twiggy - Lightning-fast Git Visualization Tool");
+    println!("Version: 0.1.0");
+    println!("Built with Rust for maximum performance");
+    println!();
+    println!("Welcome to the future of Git visualization!");
+    println!("Phase 1: Project Bootstrap - Complete ✓");
 
-    eframe::run_native(
-        "Egui Template",
-        options,
-        Box::new(|_cc| Ok(Box::new(MainApp::default()))),
-    )
+    Ok(())
 }
