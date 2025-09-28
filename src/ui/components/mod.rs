@@ -1,4 +1,5 @@
 pub mod error_dialog;
+pub mod log_viewer;
 
 #[allow(unused_imports)]
 pub use error_dialog::*;

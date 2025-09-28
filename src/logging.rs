@@ -150,13 +150,107 @@ where
     let result = func();
     let duration = start.elapsed();
     
-    tracing::debug!(
-        operation = operation,
-        duration_ms = duration.as_millis(),
-        "Performance measurement"
-    );
+    if duration.as_millis() > 100 {
+        tracing::warn!(
+            operation = operation,
+            duration_ms = duration.as_millis(),
+            "Slow operation detected"
+        );
+    } else {
+        tracing::debug!(
+            operation = operation,
+            duration_ms = duration.as_millis(),
+            "Performance measurement"
+        );
+    }
     
     result
+}
+
+pub async fn log_async_performance<T, F, Fut>(operation: &str, func: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let start = std::time::Instant::now();
+    let result = func().await;
+    let duration = start.elapsed();
+    
+    if duration.as_millis() > 500 {
+        tracing::warn!(
+            operation = operation,
+            duration_ms = duration.as_millis(),
+            "Slow async operation detected"
+        );
+    } else {
+        tracing::debug!(
+            operation = operation,
+            duration_ms = duration.as_millis(),
+            "Async performance measurement"
+        );
+    }
+    
+    result
+}
+
+pub fn log_memory_usage(operation: &str) {
+    if let Ok(usage) = get_memory_usage() {
+        tracing::debug!(
+            operation = operation,
+            memory_mb = usage / 1024 / 1024,
+            "Memory usage"
+        );
+        
+        if usage > 500 * 1024 * 1024 {
+            tracing::warn!(
+                operation = operation,
+                memory_mb = usage / 1024 / 1024,
+                "High memory usage detected"
+            );
+        }
+    }
+}
+
+fn get_memory_usage() -> Result<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem;
+        use winapi::um::processthreadsapi::GetCurrentProcess;
+        use winapi::um::psapi::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        
+        unsafe {
+            let mut pmc: PROCESS_MEMORY_COUNTERS = mem::zeroed();
+            let result = GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut pmc,
+                mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            );
+            
+            if result != 0 {
+                Ok(pmc.WorkingSetSize as u64)
+            } else {
+                Err(TwiggyError::Application {
+                    message: "Failed to get memory info".to_string(),
+                })
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::fs;
+        let status = fs::read_to_string("/proc/self/status")?;
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let kb: u64 = parts[1].parse()?;
+                    return Ok(kb * 1024);
+                }
+            }
+        }
+        Err("Could not parse memory usage".into())
+    }
 }
 
 #[macro_export]

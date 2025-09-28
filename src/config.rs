@@ -10,11 +10,12 @@ pub struct AppConfig {
     pub git: GitConfig,
     pub ui: UiConfig,
     pub performance: PerformanceConfig,
+    pub logging: LoggingConfig,
     #[serde(default = "default_version")]
     pub version: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowConfig {
     pub width: f32,
     pub height: f32,
@@ -24,7 +25,7 @@ pub struct WindowConfig {
     pub remember_position: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThemeConfig {
     pub theme_type: ThemeType,
     pub font_size: f32,
@@ -71,6 +72,38 @@ pub struct PerformanceConfig {
     pub enable_background_operations: bool,
     pub max_background_threads: usize,
     pub target_fps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    pub level: LogLevel,
+    pub file_enabled: bool,
+    pub console_enabled: bool,
+    pub max_file_size: u64,
+    pub max_files: usize,
+    pub log_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Info,
+            file_enabled: true,
+            console_enabled: cfg!(debug_assertions),
+            max_file_size: 10 * 1024 * 1024,
+            max_files: 5,
+            log_directory: None,
+        }
+    }
 }
 
 fn default_version() -> u32 {
@@ -121,6 +154,7 @@ impl Default for AppConfig {
                 max_background_threads: 4,
                 target_fps: 60,
             },
+            logging: LoggingConfig::default(),
             version: 1,
         }
     }
