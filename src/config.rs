@@ -41,10 +41,11 @@ pub enum ThemeType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
-    pub default_clone_path: Option<PathBuf>,
+    pub default_clone_path: String,
     pub max_commits: usize,
     pub default_branch: String,
     pub auto_fetch: bool,
+    pub show_stashes: bool,
     pub fetch_interval_minutes: u32,
 }
 
@@ -67,7 +68,9 @@ pub struct PanelSizes {
 pub struct PerformanceConfig {
     pub enable_caching: bool,
     pub cache_size_mb: usize,
-    pub background_operations: bool,
+    pub enable_background_operations: bool,
+    pub max_background_threads: usize,
+    pub target_fps: u32,
 }
 
 fn default_version() -> u32 {
@@ -92,10 +95,13 @@ impl Default for AppConfig {
                 accent_color: "#007ACC".to_string(),
             },
             git: GitConfig {
-                default_clone_path: None,
+                default_clone_path: std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string()),
                 max_commits: 1000,
                 default_branch: "main".to_string(),
                 auto_fetch: true,
+                show_stashes: false,
                 fetch_interval_minutes: 15,
             },
             ui: UiConfig {
@@ -111,7 +117,9 @@ impl Default for AppConfig {
             performance: PerformanceConfig {
                 enable_caching: true,
                 cache_size_mb: 100,
-                background_operations: true,
+                enable_background_operations: true,
+                max_background_threads: 4,
+                target_fps: 60,
             },
             version: 1,
         }
@@ -119,6 +127,16 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn copy_for_temp(&self) -> Self {
+        self.clone()
+    }
+
+    pub fn apply_from_temp(&mut self, temp_config: &AppConfig) -> Result<()> {
+        temp_config.validate()?;
+        *self = temp_config.clone();
+        Ok(())
+    }
+
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
         
@@ -234,6 +252,20 @@ impl AppConfig {
             return Err(TwiggyError::Validation {
                 field: "performance.cache_size_mb".to_string(),
                 message: "Cache size must be between 1 and 2048 MB".to_string(),
+            });
+        }
+
+        if self.performance.max_background_threads == 0 || self.performance.max_background_threads > 16 {
+            return Err(TwiggyError::Validation {
+                field: "performance.max_background_threads".to_string(),
+                message: "Max background threads must be between 1 and 16".to_string(),
+            });
+        }
+
+        if self.performance.target_fps < 30 || self.performance.target_fps > 144 {
+            return Err(TwiggyError::Validation {
+                field: "performance.target_fps".to_string(),
+                message: "Target FPS must be between 30 and 144".to_string(),
             });
         }
 
