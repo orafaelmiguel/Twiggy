@@ -1,5 +1,6 @@
 pub mod error_dialog;
 pub mod log_viewer;
+pub mod commit_list;
 
 #[allow(unused_imports)]
 pub use error_dialog::*;

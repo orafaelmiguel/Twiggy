@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer, git::repository::GitRepository};
+use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::{log_viewer::LogViewer, commit_list::CommitListComponent}, git::repository::GitRepository};
 use std::{time::Instant, path::PathBuf};
 
 #[derive(Debug)]
@@ -44,6 +44,7 @@ pub struct TwiggyApp {
     repository_loading: bool,
     last_branch_refresh: Option<Instant>,
     branch_refresh_interval: std::time::Duration,
+    commit_list: CommitListComponent,
 }
 
 #[derive(Debug)]
@@ -121,6 +122,7 @@ impl Default for TwiggyApp {
             repository_loading: false,
             last_branch_refresh: None,
             branch_refresh_interval: std::time::Duration::from_secs(5),
+            commit_list: CommitListComponent::new(),
         }
     }
 }
@@ -173,6 +175,7 @@ impl TwiggyApp {
             repository_loading: false,
             last_branch_refresh: None,
             branch_refresh_interval: std::time::Duration::from_secs(5),
+            commit_list: CommitListComponent::new(),
         };
 
         app.add_notification(
@@ -2050,6 +2053,13 @@ impl TwiggyApp {
         }
     }
     
+    fn handle_commit_list_keyboard(&mut self, ctx: &egui::Context) {
+        if let Some(ref repo) = self.current_repository {
+            let commits = repo.get_commits();
+            self.commit_list.handle_keyboard(ctx, commits);
+        }
+    }
+    
     fn render_repository_info(&self, ui: &mut egui::Ui) {
         if let Some(ref repo) = self.current_repository {
             ui.group(|ui| {
@@ -2158,71 +2168,96 @@ impl eframe::App for TwiggyApp {
             }
             
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("🌿 Twiggy");
-                    ui.label("Lightning-fast Git Visualization Tool");
-                    ui.add_space(20.0);
+                if let Some(ref repo) = self.current_repository {
+                    let repo_path = repo.path().display().to_string();
+                    let commits = repo.get_commits().to_vec();
                     
-                    if let Some(ref repo) = self.current_repository {
-                        ui.label("Phase 10: Repository Management - ✅ Active");
-                        ui.add_space(10.0);
-                        self.render_repository_info(ui);
-                    } else {
+                    drop(repo);
+                    
+                    self.handle_commit_list_keyboard(ctx);
+                    
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading("🌿 Twiggy");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(format!("Repository: {}", repo_path));
+                            });
+                        });
+                        
+                        ui.separator();
+                        ui.add_space(5.0);
+                        
+                        let commit_response = self.commit_list.render(ui, &commits);
+                        
+                        if let Some(clicked_commit) = commit_response.clicked {
+                            tracing::info!("Commit selected: {}", clicked_commit);
+                        }
+                        
+                        if let Some(double_clicked_commit) = commit_response.double_clicked {
+                            tracing::info!("Commit double-clicked: {}", double_clicked_commit);
+                        }
+                    });
+                } else {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("🌿 Twiggy");
+                        ui.label("Lightning-fast Git Visualization Tool");
+                        ui.add_space(20.0);
+                        
                         ui.label("Phase 10: Repository Management - Ready");
                         ui.add_space(10.0);
                         ui.label("Open a repository from the File menu to get started");
-                    }
-                    
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    
-                    ui.horizontal(|ui| {
-                        ui.label("Frame Time:");
-                        ui.label(format!("{:.1}ms", self.performance_metrics.average_frame_time_ms));
                         
+                        ui.add_space(10.0);
                         ui.separator();
+                        ui.add_space(10.0);
                         
-                        ui.label("Frames:");
-                        ui.label(format!("{}", self.performance_metrics.frame_count));
-                    });
-                    
-                    ui.add_space(10.0);
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Test Error").clicked() {
-                            let test_error = TwiggyError::Application {
-                                message: "This is a test error for demonstration".to_string(),
-                            };
-                            self.handle_error(test_error);
-                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Frame Time:");
+                            ui.label(format!("{:.1}ms", self.performance_metrics.average_frame_time_ms));
+                            
+                            ui.separator();
+                            
+                            ui.label("Frames:");
+                            ui.label(format!("{}", self.performance_metrics.frame_count));
+                        });
                         
-                        if ui.button("Test Notification").clicked() {
-                            self.add_notification(
-                                "This is a test notification".to_string(),
-                                NotificationType::Info,
-                                Some(5),
-                            );
-                        }
+                        ui.add_space(10.0);
                         
-                        if ui.button("Settings").clicked() {
-                            self.temp_config = self.config.clone();
-                            self.show_settings = true;
-                        }
-                        
-                        if ui.button("Reset Config").clicked() {
-                            if let Err(e) = self.config.reset_to_defaults() {
-                                self.handle_error(e);
-                            } else {
+                        ui.horizontal(|ui| {
+                            if ui.button("Test Error").clicked() {
+                                let test_error = TwiggyError::Application {
+                                    message: "This is a test error for demonstration".to_string(),
+                                };
+                                self.handle_error(test_error);
+                            }
+                            
+                            if ui.button("Test Notification").clicked() {
                                 self.add_notification(
-                                    "Configuration reset successfully".to_string(),
-                                    NotificationType::Success,
-                                    Some(3),
+                                    "This is a test notification".to_string(),
+                                    NotificationType::Info,
+                                    Some(5),
                                 );
                             }
-                        }
+                            
+                            if ui.button("Settings").clicked() {
+                                self.temp_config = self.config.clone();
+                                self.show_settings = true;
+                            }
+                            
+                            if ui.button("Reset Config").clicked() {
+                                if let Err(e) = self.config.reset_to_defaults() {
+                                    self.handle_error(e);
+                                } else {
+                                    self.add_notification(
+                                        "Configuration reset successfully".to_string(),
+                                        NotificationType::Success,
+                                        Some(3),
+                                    );
+                                }
+                            }
+                        });
                     });
-                });
+                }
             });
         });
         
