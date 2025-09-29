@@ -1,4 +1,4 @@
-use git2::Repository;
+use git2::{Repository, Branch, BranchType, Direction};
 use std::path::{Path, PathBuf};
 use crate::error::{Result, TwiggyError};
 
@@ -15,6 +15,22 @@ pub enum RepositoryHealth {
     InOperation(String),
     Corrupted,
     Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchInfo {
+    pub name: String,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub state: BranchState,
+}
+
+#[derive(Debug, Clone)]
+pub enum BranchState {
+    Normal,
+    DetachedHead,
+    Unborn,
 }
 
 pub struct GitRepository {
@@ -117,6 +133,92 @@ impl GitRepository {
     
     pub fn is_detached(&self) -> bool {
         self.is_detached
+    }
+    
+    pub fn get_branch_info(&self) -> Result<BranchInfo> {
+        match self.inner.head() {
+            Ok(head) => {
+                if head.is_branch() {
+                    let branch_name = head.shorthand()
+                        .ok_or_else(|| TwiggyError::Git {
+                            message: "Invalid branch name".to_string(),
+                            source: git2::Error::from_str("Invalid branch name"),
+                        })?
+                        .to_string();
+                    
+                    let branch = self.inner.find_branch(&branch_name, BranchType::Local)
+                        .map_err(|e| TwiggyError::Git {
+                            message: "Failed to find branch".to_string(),
+                            source: e,
+                        })?;
+                    
+                    let upstream = branch.upstream()
+                        .ok()
+                        .and_then(|u| u.name().ok().flatten().map(|s| s.to_string()));
+                    
+                    let (ahead, behind) = self.calculate_ahead_behind(&branch)?;
+                    
+                    Ok(BranchInfo {
+                        name: branch_name,
+                        upstream,
+                        ahead,
+                        behind,
+                        state: BranchState::Normal,
+                    })
+                } else {
+                    let name = if let Some(oid) = head.target() {
+                        format!("HEAD detached at {:.7}", oid)
+                    } else {
+                        "HEAD (detached)".to_string()
+                    };
+                    
+                    Ok(BranchInfo {
+                        name,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        state: BranchState::DetachedHead,
+                    })
+                }
+            }
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                Ok(BranchInfo {
+                    name: "main".to_string(),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    state: BranchState::Unborn,
+                })
+            }
+            Err(e) => Err(TwiggyError::Git {
+                message: "Failed to get HEAD".to_string(),
+                source: e,
+            })
+        }
+    }
+    
+    fn calculate_ahead_behind(&self, branch: &Branch) -> Result<(usize, usize)> {
+        let local_oid = branch.get().target()
+            .ok_or_else(|| TwiggyError::Git {
+                message: "Branch has no target".to_string(),
+                source: git2::Error::from_str("No target"),
+            })?;
+        
+        if let Ok(upstream) = branch.upstream() {
+            if let Some(upstream_oid) = upstream.get().target() {
+                match self.inner.graph_ahead_behind(local_oid, upstream_oid) {
+                    Ok((ahead, behind)) => return Ok((ahead, behind)),
+                    Err(_) => return Ok((0, 0)),
+                }
+            }
+        }
+        
+        Ok((0, 0))
+    }
+    
+    pub fn refresh(&mut self) -> Result<()> {
+        self.refresh_branch_info()?;
+        Ok(())
     }
     
     pub fn repository_name(&self) -> String {

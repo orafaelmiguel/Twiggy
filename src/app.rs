@@ -42,6 +42,8 @@ pub struct TwiggyApp {
     show_shortcuts: bool,
     current_repository: Option<GitRepository>,
     repository_loading: bool,
+    last_branch_refresh: Option<Instant>,
+    branch_refresh_interval: std::time::Duration,
 }
 
 #[derive(Debug)]
@@ -117,6 +119,8 @@ impl Default for TwiggyApp {
             show_shortcuts: false,
             current_repository: None,
             repository_loading: false,
+            last_branch_refresh: None,
+            branch_refresh_interval: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -167,6 +171,8 @@ impl TwiggyApp {
             show_shortcuts: false,
             current_repository: None,
             repository_loading: false,
+            last_branch_refresh: None,
+            branch_refresh_interval: std::time::Duration::from_secs(5),
         };
 
         app.add_notification(
@@ -308,6 +314,24 @@ impl TwiggyApp {
                 true
             }
         });
+    }
+
+    fn refresh_branch_info_if_needed(&mut self) {
+        if let Some(ref mut repo) = self.current_repository {
+            let now = Instant::now();
+            let should_refresh = match self.last_branch_refresh {
+                Some(last_refresh) => now.duration_since(last_refresh) >= self.branch_refresh_interval,
+                None => true,
+            };
+            
+            if should_refresh {
+                if let Err(e) = repo.refresh() {
+                    tracing::warn!("Failed to refresh branch information: {}", e);
+                } else {
+                    self.last_branch_refresh = Some(now);
+                }
+            }
+        }
     }
 
     fn render_error_dialog(&mut self, ctx: &egui::Context) {
@@ -1623,6 +1647,94 @@ impl TwiggyApp {
         });
     }
 
+    fn render_status_bar(&self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status_bar")
+            .min_height(28.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    
+                    if let Some(ref repo) = self.current_repository {
+                        match repo.get_branch_info() {
+                            Ok(branch_info) => {
+                                match branch_info.state {
+                                    crate::git::repository::BranchState::Normal => {
+                                        ui.label(egui::RichText::new("🌿").size(16.0));
+                                        ui.strong(egui::RichText::new(&branch_info.name).size(14.0));
+                                        ui.colored_label(egui::Color32::from_rgb(34, 139, 34), egui::RichText::new("●").size(12.0));
+                                    }
+                                    crate::git::repository::BranchState::DetachedHead => {
+                                        ui.label(egui::RichText::new("⚠️").size(16.0));
+                                        ui.colored_label(egui::Color32::YELLOW, egui::RichText::new("DETACHED HEAD").size(12.0).strong());
+                                        ui.colored_label(egui::Color32::from_rgb(255, 165, 0), egui::RichText::new("●").size(12.0));
+                                    }
+                                    crate::git::repository::BranchState::Unborn => {
+                                        ui.label(egui::RichText::new("🆕").size(16.0));
+                                        ui.colored_label(egui::Color32::LIGHT_BLUE, egui::RichText::new("UNBORN").size(12.0).strong());
+                                        ui.colored_label(egui::Color32::LIGHT_BLUE, egui::RichText::new("●").size(12.0));
+                                    }
+                                }
+                                
+                                if let Some(ref upstream) = branch_info.upstream {
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("📡").size(14.0));
+                                    ui.label(egui::RichText::new("→").size(12.0).color(egui::Color32::GRAY));
+                                    ui.colored_label(egui::Color32::from_rgb(100, 149, 237), egui::RichText::new(upstream).size(12.0));
+                                    
+                                    if branch_info.ahead > 0 || branch_info.behind > 0 {
+                                        ui.separator();
+                                        
+                                        if branch_info.ahead > 0 {
+                                            ui.colored_label(egui::Color32::GREEN, egui::RichText::new("↑").size(14.0));
+                                            ui.colored_label(egui::Color32::GREEN, egui::RichText::new(format!("{}", branch_info.ahead)).size(12.0).strong());
+                                        }
+                                        
+                                        if branch_info.behind > 0 {
+                                            ui.colored_label(egui::Color32::RED, egui::RichText::new("↓").size(14.0));
+                                            ui.colored_label(egui::Color32::RED, egui::RichText::new(format!("{}", branch_info.behind)).size(12.0).strong());
+                                        }
+                                        
+                                        let sync_status = if branch_info.ahead == 0 && branch_info.behind == 0 {
+                                            ("✅", "In sync", egui::Color32::GREEN)
+                                        } else if branch_info.ahead > 0 && branch_info.behind == 0 {
+                                            ("📤", "Push needed", egui::Color32::BLUE)
+                                        } else if branch_info.ahead == 0 && branch_info.behind > 0 {
+                                            ("📥", "Pull needed", egui::Color32::from_rgb(255, 165, 0))
+                                        } else {
+                                            ("🔄", "Sync needed", egui::Color32::YELLOW)
+                                        };
+                                        
+                                        ui.separator();
+                                        ui.label(egui::RichText::new(sync_status.0).size(14.0));
+                                        ui.colored_label(sync_status.2, egui::RichText::new(sync_status.1).size(11.0));
+                                    } else {
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("✅").size(14.0));
+                                        ui.colored_label(egui::Color32::GREEN, egui::RichText::new("In sync").size(11.0));
+                                    }
+                                } else {
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("🔗").size(14.0));
+                                    ui.colored_label(egui::Color32::GRAY, egui::RichText::new("No upstream").size(11.0).italics());
+                                }
+                            }
+                            Err(_) => {
+                                ui.colored_label(egui::Color32::RED, egui::RichText::new("❌ Error reading branch info").size(12.0));
+                            }
+                        }
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new("No repository open").size(12.0).italics());
+                    }
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("Frame: {:.1}ms", self.performance_metrics.average_frame_time_ms)).size(10.0));
+                    });
+                });
+                ui.add_space(4.0);
+            });
+    }
+
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F10))) {
             self.config.ui.menu_preferences.show_menu_bar = !self.config.ui.menu_preferences.show_menu_bar;
@@ -1991,6 +2103,7 @@ impl eframe::App for TwiggyApp {
             self.update_performance_metrics();
             self.auto_save_config_if_needed();
             self.cleanup_old_notifications();
+            self.refresh_branch_info_if_needed();
             
             self.handle_viewport_events(ctx);
             self.detect_window_changes(ctx);
@@ -1999,6 +2112,7 @@ impl eframe::App for TwiggyApp {
             
             self.handle_keyboard_shortcuts(ctx);
             self.render_menu_bar(ctx);
+            self.render_status_bar(ctx);
             
             self.render_error_dialog(ctx);
             self.render_notifications(ctx);
