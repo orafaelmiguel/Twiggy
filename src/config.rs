@@ -56,6 +56,15 @@ pub struct UiConfig {
     pub show_file_tree: bool,
     pub show_diff_viewer: bool,
     pub panel_sizes: PanelSizes,
+    pub menu_preferences: MenuPreferences,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MenuPreferences {
+    pub show_menu_bar: bool,
+    pub show_keyboard_shortcuts: bool,
+    pub compact_menus: bool,
+    pub show_icons: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +154,12 @@ impl Default for AppConfig {
                     left_panel_width: 250.0,
                     right_panel_width: 300.0,
                     bottom_panel_height: 200.0,
+                },
+                menu_preferences: MenuPreferences {
+                    show_menu_bar: true,
+                    show_keyboard_shortcuts: true,
+                    compact_menus: false,
+                    show_icons: false,
                 },
             },
             performance: PerformanceConfig {

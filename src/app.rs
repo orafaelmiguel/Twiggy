@@ -38,6 +38,8 @@ pub struct TwiggyApp {
     last_window_state: Option<WindowState>,
     log_viewer: LogViewer,
     show_log_viewer: bool,
+    show_about: bool,
+    show_shortcuts: bool,
 }
 
 #[derive(Debug)]
@@ -109,6 +111,8 @@ impl Default for TwiggyApp {
             last_window_state: None,
             log_viewer: LogViewer::new(),
             show_log_viewer: false,
+            show_about: false,
+            show_shortcuts: false,
         }
     }
 }
@@ -155,6 +159,8 @@ impl TwiggyApp {
             last_window_state: None,
             log_viewer: LogViewer::new(),
             show_log_viewer: false,
+            show_about: false,
+            show_shortcuts: false,
         };
 
         app.add_notification(
@@ -1447,6 +1453,308 @@ impl TwiggyApp {
         
         Ok(egui::Color32::from_rgb(r, g, b))
     }
+
+    fn render_menu_bar(&mut self, ctx: &egui::Context) {
+        if !self.config.ui.menu_preferences.show_menu_bar {
+            return;
+        }
+        
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.add(egui::Button::new("Open Repository").shortcut_text("Ctrl+O")).clicked() {
+                        self.open_repository();
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
+                    if ui.add(egui::Button::new("Settings").shortcut_text("Ctrl+S")).clicked() {
+                        self.temp_config = self.config.clone();
+                        self.show_settings = true;
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
+                    if ui.add(egui::Button::new("Exit").shortcut_text("Ctrl+Q")).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.close_menu();
+                    }
+                });
+                
+                ui.menu_button("Edit", |ui| {
+                    let has_selection = false;
+                    
+                    ui.add_enabled(has_selection, egui::Button::new("Copy").shortcut_text("Ctrl+C"));
+                    ui.add_enabled(has_selection, egui::Button::new("Cut").shortcut_text("Ctrl+X"));
+                    ui.add_enabled(true, egui::Button::new("Paste").shortcut_text("Ctrl+V"));
+                    
+                    ui.separator();
+                    
+                    if ui.add(egui::Button::new("Select All").shortcut_text("Ctrl+A")).clicked() {
+                        ui.close_menu();
+                    }
+                });
+                
+                ui.menu_button("View", |ui| {
+                    let theme_text = match self.config.theme.theme_type {
+                        ThemeType::Light => "Switch to Dark Theme",
+                        ThemeType::Dark => "Switch to Light Theme",
+                        ThemeType::System => "Toggle Theme",
+                    };
+                    
+                    if ui.button(theme_text).clicked() {
+                        self.toggle_theme();
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
+                    let log_viewer_text = if self.show_log_viewer { "Hide Log Viewer" } else { "Show Log Viewer" };
+                    if ui.button(log_viewer_text).clicked() {
+                        self.show_log_viewer = !self.show_log_viewer;
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
+                    let menu_bar_text = if self.config.ui.menu_preferences.show_menu_bar { "Hide Menu Bar" } else { "Show Menu Bar" };
+                    if ui.button(menu_bar_text).clicked() {
+                        self.config.ui.menu_preferences.show_menu_bar = !self.config.ui.menu_preferences.show_menu_bar;
+                        if let Err(e) = self.config.save() {
+                            self.handle_error(e);
+                        }
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
+                    if ui.button("Reset Layout").clicked() {
+                        self.config.window.width = 1200.0;
+                        self.config.window.height = 800.0;
+                        self.config.window.maximized = false;
+                        self.config.window.position_x = None;
+                        self.config.window.position_y = None;
+                        
+                        if let Err(e) = self.config.save() {
+                            self.handle_error(e);
+                        } else {
+                            self.add_notification(
+                                "Layout reset to default".to_string(),
+                                NotificationType::Success,
+                                Some(2),
+                            );
+                        }
+                        ui.close_menu();
+                    }
+                });
+                
+                ui.menu_button("Help", |ui| {
+                    if self.config.ui.menu_preferences.show_keyboard_shortcuts {
+                        if ui.add(egui::Button::new("Keyboard Shortcuts").shortcut_text("F1")).clicked() {
+                            self.show_shortcuts = true;
+                            ui.close_menu();
+                        }
+                        
+                        ui.separator();
+                    }
+                    
+                    if ui.button("About Twiggy").clicked() {
+                        self.show_about = true;
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+    }
+
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F10))) {
+            self.config.ui.menu_preferences.show_menu_bar = !self.config.ui.menu_preferences.show_menu_bar;
+            if let Err(e) = self.config.save() {
+                self.handle_error(e);
+            } else {
+                let status = if self.config.ui.menu_preferences.show_menu_bar { "shown" } else { "hidden" };
+                self.add_notification(
+                    format!("Menu bar {}", status),
+                    NotificationType::Info,
+                    Some(2),
+                );
+            }
+        }
+        
+        if !self.config.ui.menu_preferences.show_keyboard_shortcuts {
+            return;
+        }
+        
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::O))) {
+            self.open_repository();
+        }
+        
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S))) {
+            self.temp_config = self.config.clone();
+            self.show_settings = true;
+        }
+        
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Q))) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F1))) {
+            self.show_shortcuts = true;
+        }
+    }
+
+    fn render_help_dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_about {
+            egui::Window::new("About Twiggy")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([400.0, 300.0])
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+                        ui.heading("🌿 Twiggy");
+                        ui.add_space(5.0);
+                        ui.label("Lightning-fast Git Visualization Tool");
+                        ui.add_space(20.0);
+                        
+                        ui.separator();
+                        ui.add_space(10.0);
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Version:");
+                            ui.label(env!("CARGO_PKG_VERSION"));
+                        });
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Author:");
+                            ui.label("Twiggy Team");
+                        });
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Built with:");
+                            ui.label("Rust + egui");
+                        });
+                        
+                        ui.add_space(20.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        
+                        ui.label("Built with ❤️ using egui and Rust");
+                        ui.label("© 2024 Twiggy Team");
+                        
+                        ui.add_space(20.0);
+                        
+                        if ui.button("Close").clicked() {
+                            self.show_about = false;
+                        }
+                    });
+                });
+        }
+
+        if self.show_shortcuts {
+            egui::Window::new("Keyboard Shortcuts")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([500.0, 400.0])
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.heading("Application Shortcuts");
+                        ui.add_space(10.0);
+                        
+                        egui::Grid::new("shortcuts_grid")
+                            .num_columns(2)
+                            .spacing([40.0, 4.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Action");
+                                ui.label("Shortcut");
+                                ui.end_row();
+                                
+                                ui.separator();
+                                ui.separator();
+                                ui.end_row();
+                                
+                                ui.label("Open Repository");
+                                ui.label("Ctrl+O");
+                                ui.end_row();
+                                
+                                ui.label("Settings");
+                                ui.label("Ctrl+,");
+                                ui.end_row();
+                                
+                                ui.label("Exit Application");
+                                ui.label("Ctrl+Q");
+                                ui.end_row();
+                                
+                                ui.label("Show Shortcuts");
+                                ui.label("F1");
+                                ui.end_row();
+                                
+                                ui.label("Toggle Menu Bar");
+                                ui.label("F10");
+                                ui.end_row();
+                                
+                                ui.label("Close Dialog");
+                                ui.label("Escape");
+                                ui.end_row();
+                                
+                                ui.separator();
+                                ui.separator();
+                                ui.end_row();
+                                
+                                ui.label("Copy");
+                                ui.label("Ctrl+C");
+                                ui.end_row();
+                                
+                                ui.label("Select All");
+                                ui.label("Ctrl+A");
+                                ui.end_row();
+                            });
+                        
+                        ui.add_space(20.0);
+                        
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                self.show_shortcuts = false;
+                            }
+                        });
+                    });
+                });
+        }
+    }
+
+    fn open_repository(&mut self) {
+        self.add_notification(
+            "Repository opening functionality will be implemented in future phases".to_string(),
+            NotificationType::Info,
+            Some(3),
+        );
+    }
+
+    fn toggle_theme(&mut self) {
+        self.temp_config.theme.theme_type = match self.temp_config.theme.theme_type {
+            ThemeType::Light => ThemeType::Dark,
+            ThemeType::Dark => ThemeType::Light,
+            ThemeType::System => ThemeType::Light,
+        };
+        
+        self.config.theme.theme_type = self.temp_config.theme.theme_type.clone();
+        
+        if let Err(e) = self.config.save() {
+            self.handle_error(e);
+        } else {
+            self.add_notification(
+                format!("Theme changed to {:?}", self.config.theme.theme_type),
+                NotificationType::Success,
+                Some(2),
+            );
+        }
+    }
 }
 
 impl eframe::App for TwiggyApp {
@@ -1461,9 +1769,13 @@ impl eframe::App for TwiggyApp {
             
             self.apply_theme_to_context(ctx);
             
+            self.handle_keyboard_shortcuts(ctx);
+            self.render_menu_bar(ctx);
+            
             self.render_error_dialog(ctx);
             self.render_notifications(ctx);
             self.render_settings_dialog(ctx, frame);
+            self.render_help_dialogs(ctx);
             
             if self.show_log_viewer {
                 egui::Window::new("Log Viewer")
