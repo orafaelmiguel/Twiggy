@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use crate::error::{Result, TwiggyError};
 
@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub ui: UiConfig,
     pub performance: PerformanceConfig,
     pub logging: LoggingConfig,
+    pub recent_repositories: RecentRepositories,
     #[serde(default = "default_version")]
     pub version: u32,
 }
@@ -115,6 +116,56 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentRepositories {
+    pub repositories: Vec<RecentRepository>,
+    pub max_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentRepository {
+    pub path: PathBuf,
+    pub name: String,
+    pub last_opened: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for RecentRepositories {
+    fn default() -> Self {
+        Self {
+            repositories: Vec::new(),
+            max_count: 10,
+        }
+    }
+}
+
+impl RecentRepositories {
+    pub fn add_repository(&mut self, path: PathBuf, name: String) {
+        self.repositories.retain(|r| r.path != path);
+        
+        self.repositories.insert(0, RecentRepository {
+            path,
+            name,
+            last_opened: chrono::Utc::now(),
+        });
+        
+        if self.repositories.len() > self.max_count {
+            self.repositories.truncate(self.max_count);
+        }
+    }
+    
+    pub fn remove_repository(&mut self, path: &Path) {
+        self.repositories.retain(|r| r.path != path);
+    }
+    
+    pub fn clear(&mut self) {
+        self.repositories.clear();
+    }
+    
+    pub fn validate_and_clean(&mut self) {
+        self.repositories.retain(|r| r.path.exists());
+    }
+}
+
 fn default_version() -> u32 {
     1
 }
@@ -170,6 +221,7 @@ impl Default for AppConfig {
                 target_fps: 60,
             },
             logging: LoggingConfig::default(),
+            recent_repositories: RecentRepositories::default(),
             version: 1,
         }
     }

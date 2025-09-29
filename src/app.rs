@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer, git::repository::GitRepository};
-use std::time::Instant;
+use std::{time::Instant, path::PathBuf};
 
 #[derive(Debug)]
 pub struct ErrorState {
@@ -41,7 +41,6 @@ pub struct TwiggyApp {
     show_about: bool,
     show_shortcuts: bool,
     current_repository: Option<GitRepository>,
-    recent_repositories: Vec<std::path::PathBuf>,
     repository_loading: bool,
 }
 
@@ -117,7 +116,6 @@ impl Default for TwiggyApp {
             show_about: false,
             show_shortcuts: false,
             current_repository: None,
-            recent_repositories: Vec::new(),
             repository_loading: false,
         }
     }
@@ -168,7 +166,6 @@ impl TwiggyApp {
             show_about: false,
             show_shortcuts: false,
             current_repository: None,
-            recent_repositories: Vec::new(),
             repository_loading: false,
         };
 
@@ -1484,42 +1481,42 @@ impl TwiggyApp {
                     
                     ui.separator();
                     
-                    if !self.recent_repositories.is_empty() {
+                    if !self.config.recent_repositories.repositories.is_empty() {
                         ui.menu_button("Recent Repositories", |ui| {
-                            let recent_repos = self.recent_repositories.clone();
-                            for (i, repo_path) in recent_repos.iter().enumerate() {
-                                if i >= 10 { break; }
+                            let recent_repos = self.config.recent_repositories.repositories.clone();
+                            for (i, recent_repo) in recent_repos.iter().enumerate() {
+                                if i >= self.config.recent_repositories.max_count { break; }
                                 
-                                let repo_name = repo_path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or("Unknown");
+                                let display_text = if recent_repo.name.len() > 30 {
+                                    format!("{}...", &recent_repo.name[..27])
+                                } else {
+                                    recent_repo.name.clone()
+                                };
                                 
-                                if ui.button(format!("{} - {}", repo_name, repo_path.display())).clicked() {
-                                    match GitRepository::open(repo_path) {
-                                        Ok(repo) => {
-                                            self.current_repository = Some(repo);
-                                            self.add_to_recent_repositories(repo_path.clone());
-                                            self.add_notification(
-                                                format!("Repository '{}' opened", repo_name),
-                                                NotificationType::Success,
-                                                Some(3)
-                                            );
-                                        }
-                                        Err(e) => {
-                                            self.handle_error(e);
-                                        }
-                                    }
+                                let button_text = format!("{}", display_text);
+                                let tooltip_text = format!("{}\nPath: {}\nLast opened: {}", 
+                                    recent_repo.name, 
+                                    recent_repo.path.display(),
+                                    recent_repo.last_opened.format("%Y-%m-%d %H:%M")
+                                );
+                                
+                                if ui.button(button_text)
+                                    .on_hover_text(tooltip_text)
+                                    .clicked() 
+                                {
+                                    let path = recent_repo.path.clone();
+                                    self.open_recent_repository(path);
                                     ui.close_menu();
                                 }
                             }
                             
-                            if !self.recent_repositories.is_empty() {
-                                ui.separator();
-                                if ui.button("Clear Recent").clicked() {
-                                    self.recent_repositories.clear();
-                                    ui.close_menu();
+                            ui.separator();
+                            if ui.button("Clear Recent").clicked() {
+                                self.config.recent_repositories.clear();
+                                if let Err(e) = self.config.save() {
+                                    tracing::warn!("Failed to save config: {}", e);
                                 }
+                                ui.close_menu();
                             }
                         });
                         
@@ -1658,6 +1655,35 @@ impl TwiggyApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::O))) {
+            if let Some(recent_repo) = self.config.recent_repositories.repositories.first() {
+                let path = recent_repo.path.clone();
+                self.open_recent_repository(path);
+            }
+        }
+        
+        for i in 1..=9 {
+            let key = match i {
+                1 => egui::Key::Num1,
+                2 => egui::Key::Num2,
+                3 => egui::Key::Num3,
+                4 => egui::Key::Num4,
+                5 => egui::Key::Num5,
+                6 => egui::Key::Num6,
+                7 => egui::Key::Num7,
+                8 => egui::Key::Num8,
+                9 => egui::Key::Num9,
+                _ => continue,
+            };
+            
+            if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, key))) {
+                if let Some(recent_repo) = self.config.recent_repositories.repositories.get(i - 1) {
+                    let path = recent_repo.path.clone();
+                    self.open_recent_repository(path);
+                }
+            }
+        }
+        
         if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F1))) {
             self.show_shortcuts = true;
         }
@@ -1788,34 +1814,103 @@ impl TwiggyApp {
     fn open_repository(&mut self) {
         tracing::info!("Repository opening requested");
         
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("Open Git Repository")
-            .pick_folder()
-        {
-            self.repository_loading = true;
-            
-            match GitRepository::open(&path) {
-                Ok(repo) => {
-                    tracing::info!("Repository opened: {}", repo.repository_name());
-                    
-                    self.add_to_recent_repositories(path.clone());
-                    self.current_repository = Some(repo);
-                    self.repository_loading = false;
-                    
-                    self.add_notification(
-                        format!("Repository '{}' opened successfully", path.display()),
-                        NotificationType::Success,
-                        Some(3)
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("Failed to open repository: {}", e);
-                    self.repository_loading = false;
-                    self.handle_error(e);
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Open Git Repository - Select folder containing .git");
+        
+        let default_dir = self.get_default_directory_for_dialog();
+        if let Some(dir) = default_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        
+        if let Some(path) = dialog.pick_folder() {
+            self.open_repository_path(path);
+        }
+    }
+    
+    fn get_default_directory_for_dialog(&self) -> Option<PathBuf> {
+        if let Some(last_repo) = self.config.recent_repositories.repositories.first() {
+            if last_repo.path.exists() {
+                return Some(last_repo.path.clone());
+            }
+            if let Some(parent) = last_repo.path.parent() {
+                if parent.exists() {
+                    return Some(parent.to_path_buf());
                 }
             }
+        }
+        
+        if let Ok(home_dir) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            let home_path = PathBuf::from(home_dir);
+            if home_path.exists() {
+                return Some(home_path);
+            }
+        }
+        
+        None
+    }
+    
+    fn open_repository_path(&mut self, path: std::path::PathBuf) {
+        if !path.exists() {
+            tracing::error!("Repository path does not exist: {}", path.display());
+            self.show_error_message(format!("Path does not exist: {}", path.display()));
+            return;
+        }
+        
+        if !path.is_dir() {
+            tracing::error!("Repository path is not a directory: {}", path.display());
+            self.show_error_message(format!("Path is not a directory: {}", path.display()));
+            return;
+        }
+        
+        self.repository_loading = true;
+        
+        match GitRepository::open(&path) {
+            Ok(repo) => {
+                let repo_name = repo.repository_name();
+                tracing::info!("Repository opened: {}", repo_name);
+                
+                self.config.recent_repositories.add_repository(
+                    path.clone(),
+                    repo_name.clone(),
+                );
+                
+                if let Err(e) = self.config.save() {
+                    tracing::warn!("Failed to save config: {}", e);
+                }
+                
+                self.current_repository = Some(repo);
+                self.repository_loading = false;
+                
+                self.add_notification(
+                    format!("Repository '{}' opened successfully", repo_name),
+                    NotificationType::Success,
+                    Some(3)
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to open repository: {}", e);
+                self.repository_loading = false;
+                self.handle_error(e);
+            }
+        }
+    }
+    
+    fn open_recent_repository(&mut self, path: std::path::PathBuf) {
+        if path.exists() {
+            self.open_repository_path(path);
         } else {
-            self.repository_loading = false;
+            tracing::warn!("Recent repository no longer exists: {}", path.display());
+            self.config.recent_repositories.remove_repository(&path);
+            
+            if let Err(e) = self.config.save() {
+                tracing::warn!("Failed to save config: {}", e);
+            }
+            
+            self.add_notification(
+                format!("Repository not found: {}", path.display()),
+                NotificationType::Warning,
+                Some(4)
+            );
         }
     }
     
@@ -1829,18 +1924,6 @@ impl TwiggyApp {
                 NotificationType::Info,
                 Some(2)
             );
-        }
-    }
-    
-    fn add_to_recent_repositories(&mut self, path: std::path::PathBuf) {
-        if let Some(pos) = self.recent_repositories.iter().position(|p| p == &path) {
-            self.recent_repositories.remove(pos);
-        }
-        
-        self.recent_repositories.insert(0, path);
-        
-        if self.recent_repositories.len() > 10 {
-            self.recent_repositories.truncate(10);
         }
     }
     
@@ -1873,6 +1956,14 @@ impl TwiggyApp {
         }
     }
 
+    fn show_error_message(&mut self, message: String) {
+        self.add_notification(
+            message,
+            NotificationType::Error,
+            Some(5),
+        );
+    }
+    
     fn toggle_theme(&mut self) {
         self.temp_config.theme.theme_type = match self.temp_config.theme.theme_type {
             ThemeType::Light => ThemeType::Dark,
