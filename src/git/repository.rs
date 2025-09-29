@@ -1,22 +1,15 @@
-use git2::{Repository, RepositoryState};
+use git2::Repository;
 use std::path::{Path, PathBuf};
 use crate::error::{Result, TwiggyError};
-use crate::git::types::{CommitInfo, BranchInfo};
 
-pub struct GitRepository {
-    inner: Repository,
-    path: PathBuf,
-    repo_type: RepositoryType,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RepositoryType {
     Normal,
     Bare,
     Worktree,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RepositoryHealth {
     Healthy,
     InOperation(String),
@@ -24,119 +17,114 @@ pub enum RepositoryHealth {
     Unknown,
 }
 
+pub struct GitRepository {
+    inner: Repository,
+    path: PathBuf,
+    repo_type: RepositoryType,
+    current_branch: Option<String>,
+    is_detached: bool,
+}
+
 impl GitRepository {
-    pub fn detect(path: impl AsRef<Path>) -> Result<Option<Self>> {
-        let path = path.as_ref();
-        tracing::debug!("Detecting Git repository at: {}", path.display());
-        
-        match Repository::discover(path) {
-            Ok(repo) => {
-                let repo_path = repo.path().to_path_buf();
-                let repo_type = if repo.is_bare() {
-                    RepositoryType::Bare
-                } else if repo.is_worktree() {
-                    RepositoryType::Worktree
-                } else {
-                    RepositoryType::Normal
-                };
-                
-                tracing::info!("Git repository detected: {:?} at {}", repo_type, repo_path.display());
-                
-                Ok(Some(Self {
-                    inner: repo,
-                    path: repo_path,
-                    repo_type,
-                }))
-            }
-            Err(e) if e.code() == git2::ErrorCode::NotFound => {
-                tracing::debug!("No Git repository found at: {}", path.display());
-                Ok(None)
-            }
-            Err(e) => {
-                tracing::error!("Git repository detection failed: {}", e);
-                Err(TwiggyError::Git {
-                    message: format!("Repository detection failed: {}", e),
-                    source: e,
-                })
-            }
-        }
-    }
-    
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        tracing::debug!("Opening Git repository at: {}", path.display());
+        tracing::info!("Opening Git repository at: {}", path.display());
         
-        match Repository::open(path) {
-            Ok(repo) => {
-                let repo_path = repo.path().to_path_buf();
-                let repo_type = if repo.is_bare() {
-                    RepositoryType::Bare
-                } else if repo.is_worktree() {
-                    RepositoryType::Worktree
-                } else {
-                    RepositoryType::Normal
-                };
-                
-                tracing::info!("Git repository opened: {:?} at {}", repo_type, repo_path.display());
-                
-                Ok(Self {
-                    inner: repo,
-                    path: repo_path,
-                    repo_type,
-                })
-            }
-            Err(e) => {
-                tracing::error!("Failed to open Git repository: {}", e);
-                Err(TwiggyError::Git {
-                    message: format!("Failed to open repository: {}", e),
-                    source: e,
-                })
-            }
-        }
-    }
-    
-    pub fn validate(&self) -> Result<RepositoryHealth> {
-        let state = self.inner.state();
+        let repo = Repository::open(path)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to open repository: {}", e),
+                source: e,
+            })?;
         
-        let health = match state {
-            RepositoryState::Clean => RepositoryHealth::Healthy,
-            RepositoryState::Merge => RepositoryHealth::InOperation("merge".to_string()),
-            RepositoryState::Revert => RepositoryHealth::InOperation("revert".to_string()),
-            RepositoryState::CherryPick => RepositoryHealth::InOperation("cherry-pick".to_string()),
-            RepositoryState::Bisect => RepositoryHealth::InOperation("bisect".to_string()),
-            RepositoryState::Rebase => RepositoryHealth::InOperation("rebase".to_string()),
-            RepositoryState::RebaseInteractive => RepositoryHealth::InOperation("interactive rebase".to_string()),
-            RepositoryState::RebaseMerge => RepositoryHealth::InOperation("rebase merge".to_string()),
-            RepositoryState::ApplyMailbox => RepositoryHealth::InOperation("apply mailbox".to_string()),
-            RepositoryState::ApplyMailboxOrRebase => RepositoryHealth::InOperation("apply mailbox or rebase".to_string()),
-            _ => RepositoryHealth::Unknown,
+        let repo_type = if repo.is_bare() {
+            RepositoryType::Bare
+        } else if repo.is_worktree() {
+            RepositoryType::Worktree
+        } else {
+            RepositoryType::Normal
         };
         
-        tracing::debug!("Repository health check: {:?}", health);
-        Ok(health)
-    }
-    
-    pub fn is_accessible(&self) -> bool {
-        self.path.exists() && self.path.is_dir()
-    }
-    
-    pub fn check_permissions(&self) -> Result<bool> {
-        use std::fs;
+        let (current_branch, is_detached) = Self::get_current_branch_info(&repo)?;
         
-        match fs::metadata(&self.path) {
-            Ok(metadata) => {
-                let readonly = metadata.permissions().readonly();
-                tracing::debug!("Repository permissions - readonly: {}", readonly);
-                Ok(!readonly)
+        tracing::info!("Repository opened successfully: {:?}, branch: {:?}, detached: {}", 
+            repo_type, current_branch, is_detached);
+        
+        Ok(Self {
+            inner: repo,
+            path: path.to_path_buf(),
+            repo_type,
+            current_branch,
+            is_detached,
+        })
+    }
+
+    pub fn detect(path: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = path.as_ref();
+        
+        if !path.exists() {
+            return Ok(None);
+        }
+        
+        match Repository::open(path) {
+            Ok(_) => {
+                match Self::open(path) {
+                    Ok(repo) => Ok(Some(repo)),
+                    Err(_) => Ok(None),
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+    
+    fn get_current_branch_info(repo: &Repository) -> Result<(Option<String>, bool)> {
+        match repo.head() {
+            Ok(head) => {
+                let is_detached = !head.is_branch();
+                
+                if is_detached {
+                    if let Some(oid) = head.target() {
+                        let short_id = format!("{:.7}", oid);
+                        Ok((Some(format!("HEAD detached at {}", short_id)), true))
+                    } else {
+                        Ok((Some("HEAD (detached)".to_string()), true))
+                    }
+                } else if let Some(branch_name) = head.shorthand() {
+                    Ok((Some(branch_name.to_string()), false))
+                } else {
+                    Ok((Some("HEAD".to_string()), false))
+                }
+            }
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                Ok((Some("main".to_string()), false))
             }
             Err(e) => {
-                tracing::error!("Failed to check repository permissions: {}", e);
-                Err(TwiggyError::Io {
-                    operation: "check permissions".to_string(),
-                    source: e,
-                })
+                tracing::warn!("Failed to get current branch: {}", e);
+                Ok((None, false))
             }
         }
+    }
+    
+    pub fn refresh_branch_info(&mut self) -> Result<()> {
+        let (current_branch, is_detached) = Self::get_current_branch_info(&self.inner)?;
+        self.current_branch = current_branch;
+        self.is_detached = is_detached;
+        Ok(())
+    }
+    
+    pub fn current_branch(&self) -> Option<&str> {
+        self.current_branch.as_deref()
+    }
+    
+    pub fn is_detached(&self) -> bool {
+        self.is_detached
+    }
+    
+    pub fn repository_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
     }
     
     pub fn path(&self) -> &Path {
@@ -147,67 +135,85 @@ impl GitRepository {
         &self.repo_type
     }
     
-    pub fn workdir(&self) -> Option<&Path> {
-        self.inner.workdir()
-    }
-    
-    pub fn is_empty(&self) -> Result<bool> {
-        match self.inner.is_empty() {
-            Ok(empty) => {
-                tracing::debug!("Repository empty check: {}", empty);
-                Ok(empty)
-            }
-            Err(e) => {
-                tracing::error!("Failed to check if repository is empty: {}", e);
-                Err(TwiggyError::Git {
-                    message: "Failed to check repository status".to_string(),
-                    source: e,
-                })
-            }
-        }
-    }
-    
-    pub fn get_commits(&self) -> Result<Vec<CommitInfo>> {
-        Ok(vec![])
-    }
-    
-    pub fn get_branches(&self) -> Result<Vec<BranchInfo>> {
-        Ok(vec![])
-    }
-}
-
-pub fn is_git_repository(path: impl AsRef<Path>) -> Result<bool> {
-    match GitRepository::detect(path)? {
-        Some(_) => Ok(true),
-        None => Ok(false),
-    }
-}
-
-pub fn discover_repository(path: impl AsRef<Path>) -> Result<Option<PathBuf>> {
-    let path = path.as_ref();
-    tracing::debug!("Discovering Git repository from: {}", path.display());
-    
-    match Repository::discover(path) {
-        Ok(repo) => {
-            let repo_path = if let Some(workdir) = repo.workdir() {
-                workdir.to_path_buf()
-            } else {
-                repo.path().to_path_buf()
-            };
-            tracing::info!("Repository discovered at: {}", repo_path.display());
-            Ok(Some(repo_path))
-        }
-        Err(e) if e.code() == git2::ErrorCode::NotFound => {
-            tracing::debug!("No Git repository discovered from: {}", path.display());
-            Ok(None)
-        }
-        Err(e) => {
-            tracing::error!("Repository discovery failed: {}", e);
-            Err(TwiggyError::Git {
-                message: format!("Repository discovery failed: {}", e),
+    pub fn commit_count(&self) -> Result<usize> {
+        let mut revwalk = self.inner.revwalk()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to create revwalk".to_string(),
+                source: e,
+            })?;
+        
+        match revwalk.push_head() {
+            Ok(_) => Ok(revwalk.count()),
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(0),
+            Err(e) => Err(TwiggyError::Git {
+                message: "Failed to push HEAD".to_string(),
                 source: e,
             })
         }
+    }
+    
+    pub fn validate(&self) -> Result<RepositoryHealth> {
+        if self.inner.is_empty()? {
+            return Ok(RepositoryHealth::Healthy);
+        }
+        
+        let state = self.inner.state();
+        match state {
+            git2::RepositoryState::Clean => Ok(RepositoryHealth::Healthy),
+            git2::RepositoryState::Merge => Ok(RepositoryHealth::InOperation("merge".to_string())),
+            git2::RepositoryState::Revert => Ok(RepositoryHealth::InOperation("revert".to_string())),
+            git2::RepositoryState::CherryPick => Ok(RepositoryHealth::InOperation("cherry-pick".to_string())),
+            git2::RepositoryState::Bisect => Ok(RepositoryHealth::InOperation("bisect".to_string())),
+            git2::RepositoryState::Rebase => Ok(RepositoryHealth::InOperation("rebase".to_string())),
+            git2::RepositoryState::RebaseInteractive => Ok(RepositoryHealth::InOperation("interactive rebase".to_string())),
+            git2::RepositoryState::RebaseMerge => Ok(RepositoryHealth::InOperation("rebase merge".to_string())),
+            git2::RepositoryState::ApplyMailbox => Ok(RepositoryHealth::InOperation("apply mailbox".to_string())),
+            git2::RepositoryState::ApplyMailboxOrRebase => Ok(RepositoryHealth::InOperation("apply mailbox or rebase".to_string())),
+            _ => Ok(RepositoryHealth::Unknown),
+        }
+    }
+    
+    pub fn is_accessible(&self) -> bool {
+        self.path.exists() && self.path.is_dir()
+    }
+    
+    pub fn check_permissions(&self) -> Result<bool> {
+        use std::fs;
+        
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        
+        match fs::metadata(&self.path) {
+            Ok(metadata) => Ok(!metadata.permissions().readonly()),
+            Err(_) => Ok(false),
+        }
+    }
+    
+    pub fn is_empty(&self) -> Result<bool> {
+        self.inner.is_empty().map_err(|e| TwiggyError::Git {
+            message: "Failed to check if repository is empty".to_string(),
+            source: e,
+        })
+    }
+    
+    pub fn workdir(&self) -> Option<&Path> {
+        self.inner.workdir()
+    }
+}
+
+pub fn is_git_repository(path: impl AsRef<Path>) -> bool {
+    Repository::open(path).is_ok()
+}
+
+pub fn discover_repository(path: impl AsRef<Path>) -> Result<Option<PathBuf>> {
+    match Repository::discover(path) {
+        Ok(repo) => Ok(Some(repo.path().to_path_buf())),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(TwiggyError::Git {
+            message: format!("Failed to discover repository: {}", e),
+            source: e,
+        }),
     }
 }
 
@@ -215,26 +221,19 @@ pub fn validate_repository_path(path: impl AsRef<Path>) -> Result<bool> {
     let path = path.as_ref();
     
     if !path.exists() {
-        tracing::warn!("Repository path does not exist: {}", path.display());
         return Ok(false);
     }
     
     if !path.is_dir() {
-        tracing::warn!("Repository path is not a directory: {}", path.display());
         return Ok(false);
     }
     
-    match std::fs::metadata(path) {
-        Ok(_) => {
-            tracing::debug!("Repository path validation successful: {}", path.display());
-            Ok(true)
-        }
-        Err(e) => {
-            tracing::error!("Failed to validate repository path: {}", e);
-            Err(TwiggyError::Io {
-                operation: "validate path".to_string(),
-                source: e,
-            })
-        }
+    use std::fs;
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) => Err(TwiggyError::Io {
+            operation: format!("Failed to access path: {}", path.display()),
+            source: e,
+        }),
     }
 }

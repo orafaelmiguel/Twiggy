@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer, git::repository::{GitRepository, discover_repository, validate_repository_path}};
+use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer, git::repository::GitRepository};
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -40,6 +40,9 @@ pub struct TwiggyApp {
     show_log_viewer: bool,
     show_about: bool,
     show_shortcuts: bool,
+    current_repository: Option<GitRepository>,
+    recent_repositories: Vec<std::path::PathBuf>,
+    repository_loading: bool,
 }
 
 #[derive(Debug)]
@@ -113,6 +116,9 @@ impl Default for TwiggyApp {
             show_log_viewer: false,
             show_about: false,
             show_shortcuts: false,
+            current_repository: None,
+            recent_repositories: Vec::new(),
+            repository_loading: false,
         }
     }
 }
@@ -161,6 +167,9 @@ impl TwiggyApp {
             show_log_viewer: false,
             show_about: false,
             show_shortcuts: false,
+            current_repository: None,
+            recent_repositories: Vec::new(),
+            repository_loading: false,
         };
 
         app.add_notification(
@@ -1467,7 +1476,55 @@ impl TwiggyApp {
                         ui.close_menu();
                     }
                     
+                    let has_repo = self.current_repository.is_some();
+                    if ui.add_enabled(has_repo, egui::Button::new("Close Repository")).clicked() {
+                        self.close_repository();
+                        ui.close_menu();
+                    }
+                    
                     ui.separator();
+                    
+                    if !self.recent_repositories.is_empty() {
+                        ui.menu_button("Recent Repositories", |ui| {
+                            let recent_repos = self.recent_repositories.clone();
+                            for (i, repo_path) in recent_repos.iter().enumerate() {
+                                if i >= 10 { break; }
+                                
+                                let repo_name = repo_path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("Unknown");
+                                
+                                if ui.button(format!("{} - {}", repo_name, repo_path.display())).clicked() {
+                                    match GitRepository::open(repo_path) {
+                                        Ok(repo) => {
+                                            self.current_repository = Some(repo);
+                                            self.add_to_recent_repositories(repo_path.clone());
+                                            self.add_notification(
+                                                format!("Repository '{}' opened", repo_name),
+                                                NotificationType::Success,
+                                                Some(3)
+                                            );
+                                        }
+                                        Err(e) => {
+                                            self.handle_error(e);
+                                        }
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                            
+                            if !self.recent_repositories.is_empty() {
+                                ui.separator();
+                                if ui.button("Clear Recent").clicked() {
+                                    self.recent_repositories.clear();
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        
+                        ui.separator();
+                    }
                     
                     if ui.add(egui::Button::new("Settings").shortcut_text("Ctrl+S")).clicked() {
                         self.temp_config = self.config.clone();
@@ -1729,97 +1786,90 @@ impl TwiggyApp {
     }
 
     fn open_repository(&mut self) {
-        tracing::info!("Opening repository dialog");
+        tracing::info!("Repository opening requested");
         
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Select Git Repository")
-            .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+            .set_title("Open Git Repository")
             .pick_folder()
         {
-            tracing::debug!("User selected path: {}", path.display());
+            self.repository_loading = true;
             
-            match validate_repository_path(&path) {
-                Ok(true) => {
-                    tracing::debug!("Path validation successful");
+            match GitRepository::open(&path) {
+                Ok(repo) => {
+                    tracing::info!("Repository opened: {}", repo.repository_name());
                     
-                    match discover_repository(&path) {
-                        Ok(Some(repo_path)) => {
-                            tracing::info!("Repository discovered at: {}", repo_path.display());
-                            
-                            match GitRepository::detect(&repo_path) {
-                                Ok(Some(git_repo)) => {
-                                    match git_repo.validate() {
-                                        Ok(health) => {
-                                            let health_msg = match health {
-                                                crate::git::repository::RepositoryHealth::Healthy => "Repository is healthy and ready to use".to_string(),
-                                                crate::git::repository::RepositoryHealth::InOperation(op) => format!("Repository is currently in {} operation", op),
-                                                crate::git::repository::RepositoryHealth::Corrupted => "Repository appears to be corrupted".to_string(),
-                                                crate::git::repository::RepositoryHealth::Unknown => "Repository health status is unknown".to_string(),
-                                            };
-                                            
-                                            let repo_type_msg = match git_repo.repo_type() {
-                                                crate::git::repository::RepositoryType::Normal => "normal",
-                                                crate::git::repository::RepositoryType::Bare => "bare",
-                                                crate::git::repository::RepositoryType::Worktree => "worktree",
-                                            };
-                                            
-                                            tracing::info!("Repository opened successfully: {} repository at {}", repo_type_msg, repo_path.display());
-                                            
-                                            self.add_notification(
-                                                format!("Git repository detected: {} repository\n{}", repo_type_msg, health_msg),
-                                                NotificationType::Success,
-                                                Some(5),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Repository validation failed: {}", e);
-                                            self.handle_error(e);
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    tracing::warn!("No Git repository found at selected path");
-                                    self.add_notification(
-                                        "No Git repository found at the selected location".to_string(),
-                                        NotificationType::Warning,
-                                        Some(4),
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!("Repository detection failed: {}", e);
-                                    self.handle_error(e);
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::warn!("No Git repository discovered from selected path");
-                            self.add_notification(
-                                "Selected directory is not part of a Git repository".to_string(),
-                                NotificationType::Warning,
-                                Some(4),
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Repository discovery failed: {}", e);
-                            self.handle_error(e);
-                        }
-                    }
-                }
-                Ok(false) => {
-                    tracing::warn!("Invalid repository path selected");
+                    self.add_to_recent_repositories(path.clone());
+                    self.current_repository = Some(repo);
+                    self.repository_loading = false;
+                    
                     self.add_notification(
-                        "Selected path is not accessible or does not exist".to_string(),
-                        NotificationType::Error,
-                        Some(4),
+                        format!("Repository '{}' opened successfully", path.display()),
+                        NotificationType::Success,
+                        Some(3)
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Path validation failed: {}", e);
+                    tracing::error!("Failed to open repository: {}", e);
+                    self.repository_loading = false;
                     self.handle_error(e);
                 }
             }
         } else {
-            tracing::debug!("Repository selection cancelled by user");
+            self.repository_loading = false;
+        }
+    }
+    
+    fn close_repository(&mut self) {
+        if let Some(ref repo) = self.current_repository {
+            tracing::info!("Closing repository: {}", repo.repository_name());
+            self.current_repository = None;
+            
+            self.add_notification(
+                "Repository closed".to_string(),
+                NotificationType::Info,
+                Some(2)
+            );
+        }
+    }
+    
+    fn add_to_recent_repositories(&mut self, path: std::path::PathBuf) {
+        if let Some(pos) = self.recent_repositories.iter().position(|p| p == &path) {
+            self.recent_repositories.remove(pos);
+        }
+        
+        self.recent_repositories.insert(0, path);
+        
+        if self.recent_repositories.len() > 10 {
+            self.recent_repositories.truncate(10);
+        }
+    }
+    
+    fn render_repository_info(&self, ui: &mut egui::Ui) {
+        if let Some(ref repo) = self.current_repository {
+            ui.group(|ui| {
+                ui.vertical(|ui| {
+                    ui.strong(format!("Repository: {}", repo.repository_name()));
+                    ui.label(format!("Path: {}", repo.path().display()));
+                    
+                    if let Some(branch) = repo.current_branch() {
+                        ui.label(format!("Branch: {}", branch));
+                    } else {
+                        ui.colored_label(egui::Color32::YELLOW, "Branch: Detached HEAD");
+                    }
+                    
+                    match repo.commit_count() {
+                        Ok(count) => ui.label(format!("Commits: {}", count)),
+                        Err(_) => ui.colored_label(egui::Color32::GRAY, "Commits: Unable to count"),
+                    };
+                });
+            });
+        } else if self.repository_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading repository...");
+            });
+        } else {
+            ui.label("No repository open");
         }
     }
 
@@ -1889,7 +1939,15 @@ impl eframe::App for TwiggyApp {
                     ui.label("Lightning-fast Git Visualization Tool");
                     ui.add_space(20.0);
                     
-                    ui.label("Phase 7: Logging Setup - ✅ Active");
+                    if let Some(ref repo) = self.current_repository {
+                        ui.label("Phase 10: Repository Management - ✅ Active");
+                        ui.add_space(10.0);
+                        self.render_repository_info(ui);
+                    } else {
+                        ui.label("Phase 10: Repository Management - Ready");
+                        ui.add_space(10.0);
+                        ui.label("Open a repository from the File menu to get started");
+                    }
                     
                     ui.add_space(10.0);
                     ui.separator();
