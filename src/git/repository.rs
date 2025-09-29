@@ -1,6 +1,8 @@
 use git2::{Repository, Branch, BranchType, Direction};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use crate::error::{Result, TwiggyError};
+use crate::git::types::{Commit, CommitId, Signature};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepositoryType {
@@ -39,6 +41,8 @@ pub struct GitRepository {
     repo_type: RepositoryType,
     current_branch: Option<String>,
     is_detached: bool,
+    commits: Vec<Commit>,
+    commit_cache: HashMap<CommitId, Commit>,
 }
 
 impl GitRepository {
@@ -71,6 +75,8 @@ impl GitRepository {
             repo_type,
             current_branch,
             is_detached,
+            commits: Vec::new(),
+            commit_cache: HashMap::new(),
         })
     }
 
@@ -237,7 +243,7 @@ impl GitRepository {
         &self.repo_type
     }
     
-    pub fn commit_count(&self) -> Result<usize> {
+    pub fn total_commit_count(&self) -> Result<usize> {
         let mut revwalk = self.inner.revwalk()
             .map_err(|e| TwiggyError::Git {
                 message: "Failed to create revwalk".to_string(),
@@ -301,6 +307,372 @@ impl GitRepository {
     
     pub fn workdir(&self) -> Option<&Path> {
         self.inner.workdir()
+    }
+
+    pub fn load_commits(&mut self, limit: Option<usize>) -> Result<()> {
+        tracing::info!("Loading commits from repository");
+        let start = std::time::Instant::now();
+        
+        if self.inner.is_empty().unwrap_or(true) {
+            tracing::warn!("Repository is empty, no commits to load");
+            return Ok(());
+        }
+        
+        let mut revwalk = self.inner.revwalk()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to create revwalk".to_string(),
+                source: e,
+            })?;
+        
+        revwalk.push_head()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to push HEAD".to_string(),
+                source: e,
+            })?;
+        
+        revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to set sorting".to_string(),
+                source: e,
+            })?;
+        
+        let max_commits = limit.unwrap_or(1000);
+        let mut commits = Vec::new();
+        let mut loaded_count = 0;
+        
+        for (index, oid) in revwalk.enumerate() {
+            if index >= max_commits {
+                tracing::debug!("Reached commit limit of {}", max_commits);
+                break;
+            }
+            
+            let oid = oid.map_err(|e| TwiggyError::Git {
+                message: "Failed to get commit OID".to_string(),
+                source: e,
+            })?;
+            
+            match self.parse_commit(oid) {
+                Ok(commit) => {
+                    self.commit_cache.insert(commit.id, commit.clone());
+                    commits.push(commit);
+                    loaded_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse commit {}: {}", oid, e);
+                    continue;
+                }
+            }
+            
+            if loaded_count % 100 == 0 {
+                tracing::debug!("Loaded {} commits so far", loaded_count);
+            }
+        }
+        
+        let elapsed = start.elapsed();
+        tracing::info!("Loaded {} commits in {:?}", commits.len(), elapsed);
+        
+        if commits.is_empty() {
+            tracing::warn!("No commits were loaded from repository");
+        }
+        
+        self.commits = commits;
+        Ok(())
+    }
+    
+    fn parse_commit(&self, oid: git2::Oid) -> Result<Commit> {
+        let commit = self.inner.find_commit(oid)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to find commit {}", oid),
+                source: e,
+            })?;
+        
+        let message = commit.message().unwrap_or("").to_string();
+        let summary = commit.summary().unwrap_or("").to_string();
+        
+        if message.is_empty() && summary.is_empty() {
+            tracing::debug!("Commit {} has empty message", oid);
+        }
+        
+        let parents: Vec<CommitId> = commit
+            .parent_ids()
+            .map(|id| CommitId(id))
+            .collect();
+        
+        let tree_id = commit.tree_id().to_string();
+        
+        let author = match commit.author().name() {
+            Some(_) => Signature::from(&commit.author()),
+            None => {
+                tracing::debug!("Commit {} has invalid author signature", oid);
+                Signature {
+                    name: "Unknown".to_string(),
+                    email: "".to_string(),
+                    time: chrono::Utc::now(),
+                }
+            }
+        };
+        
+        let committer = match commit.committer().name() {
+            Some(_) => Signature::from(&commit.committer()),
+            None => {
+                tracing::debug!("Commit {} has invalid committer signature", oid);
+                Signature {
+                    name: "Unknown".to_string(),
+                    email: "".to_string(),
+                    time: chrono::Utc::now(),
+                }
+            }
+        };
+        
+        Ok(Commit {
+            id: CommitId(oid),
+            author,
+            committer,
+            message,
+            summary,
+            parents,
+            tree_id,
+        })
+    }
+
+    pub fn get_commits(&self) -> &[Commit] {
+        &self.commits
+    }
+
+    pub fn get_commit_by_id(&self, id: &CommitId) -> Option<&Commit> {
+        self.commit_cache.get(id)
+    }
+
+    pub fn commit_count(&self) -> usize {
+        self.commits.len()
+    }
+
+    pub fn load_commits_lazy(&mut self, start: usize, count: usize) -> Result<Vec<Commit>> {
+        tracing::debug!("Loading commits lazily: start={}, count={}", start, count);
+        
+        if start < self.commits.len() {
+            let end = (start + count).min(self.commits.len());
+            return Ok(self.commits[start..end].to_vec());
+        }
+        
+        let mut revwalk = self.inner.revwalk()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to create revwalk for lazy loading".to_string(),
+                source: e,
+            })?;
+        
+        revwalk.push_head()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to push HEAD for lazy loading".to_string(),
+                source: e,
+            })?;
+        
+        revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to set sorting for lazy loading".to_string(),
+                source: e,
+            })?;
+        
+        let mut commits = Vec::new();
+        for (index, oid) in revwalk.enumerate() {
+            if index < start {
+                continue;
+            }
+            if index >= start + count {
+                break;
+            }
+            
+            let oid = oid.map_err(|e| TwiggyError::Git {
+                message: "Failed to get commit OID in lazy loading".to_string(),
+                source: e,
+            })?;
+            
+            if let Some(cached_commit) = self.commit_cache.get(&CommitId(oid)) {
+                commits.push(cached_commit.clone());
+            } else {
+                let commit = self.parse_commit(oid)?;
+                self.commit_cache.insert(commit.id, commit.clone());
+                commits.push(commit);
+            }
+        }
+        
+        Ok(commits)
+    }
+
+    pub fn refresh_commits(&mut self, limit: Option<usize>) -> Result<()> {
+        tracing::info!("Refreshing commit data");
+        self.commits.clear();
+        self.load_commits(limit)
+    }
+
+    pub fn clear_commit_cache(&mut self) {
+        tracing::debug!("Clearing commit cache");
+        self.commit_cache.clear();
+    }
+
+    pub fn cache_size(&self) -> usize {
+        self.commit_cache.len()
+    }
+
+    pub fn find_commit_by_hash(&self, hash: &str) -> Result<Option<Commit>> {
+        tracing::debug!("Searching for commit by hash: {}", hash);
+        
+        let oid = git2::Oid::from_str(hash)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Invalid commit hash: {}", hash),
+                source: e,
+            })?;
+        
+        let commit_id = CommitId(oid);
+        
+        if let Some(cached_commit) = self.commit_cache.get(&commit_id) {
+            return Ok(Some(cached_commit.clone()));
+        }
+        
+        match self.inner.find_commit(oid) {
+            Ok(_) => {
+                let commit = self.parse_commit(oid)?;
+                Ok(Some(commit))
+            }
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(TwiggyError::Git {
+                message: format!("Failed to find commit {}", hash),
+                source: e,
+            }),
+        }
+    }
+
+    pub fn load_commits_for_branch(&mut self, branch_name: &str, limit: Option<usize>) -> Result<Vec<Commit>> {
+        tracing::info!("Loading commits for branch: {}", branch_name);
+        
+        let mut revwalk = self.inner.revwalk()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to create revwalk for branch".to_string(),
+                source: e,
+            })?;
+        
+        let branch_ref = format!("refs/heads/{}", branch_name);
+        let oid = self.inner.refname_to_id(&branch_ref)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to find branch: {}", branch_name),
+                source: e,
+            })?;
+        
+        revwalk.push(oid)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to push branch {} to revwalk", branch_name),
+                source: e,
+            })?;
+        
+        revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to set sorting for branch commits".to_string(),
+                source: e,
+            })?;
+        
+        let max_commits = limit.unwrap_or(1000);
+        let mut commits = Vec::new();
+        
+        for (index, oid) in revwalk.enumerate() {
+            if index >= max_commits {
+                break;
+            }
+            
+            let oid = oid.map_err(|e| TwiggyError::Git {
+                message: "Failed to get commit OID for branch".to_string(),
+                source: e,
+            })?;
+            
+            if let Some(cached_commit) = self.commit_cache.get(&CommitId(oid)) {
+                commits.push(cached_commit.clone());
+            } else {
+                let commit = self.parse_commit(oid)?;
+                self.commit_cache.insert(commit.id, commit.clone());
+                commits.push(commit);
+            }
+        }
+        
+        Ok(commits)
+    }
+
+    pub fn load_commits_range(&mut self, from: &str, to: &str, limit: Option<usize>) -> Result<Vec<Commit>> {
+        tracing::info!("Loading commits in range: {}..{}", from, to);
+        
+        let from_oid = git2::Oid::from_str(from)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Invalid from commit hash: {}", from),
+                source: e,
+            })?;
+        
+        let to_oid = git2::Oid::from_str(to)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Invalid to commit hash: {}", to),
+                source: e,
+            })?;
+        
+        let mut revwalk = self.inner.revwalk()
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to create revwalk for range".to_string(),
+                source: e,
+            })?;
+        
+        revwalk.push(to_oid)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to push to commit {} to revwalk", to),
+                source: e,
+            })?;
+        
+        revwalk.hide(from_oid)
+            .map_err(|e| TwiggyError::Git {
+                message: format!("Failed to hide from commit {} in revwalk", from),
+                source: e,
+            })?;
+        
+        revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| TwiggyError::Git {
+                message: "Failed to set sorting for range commits".to_string(),
+                source: e,
+            })?;
+        
+        let max_commits = limit.unwrap_or(1000);
+        let mut commits = Vec::new();
+        
+        for (index, oid) in revwalk.enumerate() {
+            if index >= max_commits {
+                break;
+            }
+            
+            let oid = oid.map_err(|e| TwiggyError::Git {
+                message: "Failed to get commit OID for range".to_string(),
+                source: e,
+            })?;
+            
+            if let Some(cached_commit) = self.commit_cache.get(&CommitId(oid)) {
+                commits.push(cached_commit.clone());
+            } else {
+                let commit = self.parse_commit(oid)?;
+                self.commit_cache.insert(commit.id, commit.clone());
+                commits.push(commit);
+            }
+        }
+        
+        Ok(commits)
+    }
+
+    pub fn search_commits(&self, query: &str) -> Vec<&Commit> {
+        tracing::debug!("Searching commits with query: {}", query);
+        let query_lower = query.to_lowercase();
+        
+        self.commits
+            .iter()
+            .filter(|commit| {
+                commit.message.to_lowercase().contains(&query_lower) ||
+                commit.summary.to_lowercase().contains(&query_lower) ||
+                commit.author.name.to_lowercase().contains(&query_lower) ||
+                commit.author.email.to_lowercase().contains(&query_lower) ||
+                commit.id.as_str().starts_with(&query_lower)
+            })
+            .collect()
     }
 }
 

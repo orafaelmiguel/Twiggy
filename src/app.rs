@@ -1977,9 +1977,26 @@ impl TwiggyApp {
         self.repository_loading = true;
         
         match GitRepository::open(&path) {
-            Ok(repo) => {
+            Ok(mut repo) => {
                 let repo_name = repo.repository_name();
                 tracing::info!("Repository opened: {}", repo_name);
+                
+                if let Err(e) = repo.load_commits(Some(1000)) {
+                    tracing::warn!("Failed to load commits: {}", e);
+                    self.add_notification(
+                        format!("Repository opened but failed to load commits: {}", e),
+                        NotificationType::Warning,
+                        Some(5)
+                    );
+                } else {
+                    let commit_count = repo.commit_count();
+                    tracing::info!("Loaded {} commits from repository", commit_count);
+                    self.add_notification(
+                        format!("Repository '{}' opened with {} commits", repo_name, commit_count),
+                        NotificationType::Success,
+                        Some(3)
+                    );
+                }
                 
                 self.config.recent_repositories.add_repository(
                     path.clone(),
@@ -1992,12 +2009,6 @@ impl TwiggyApp {
                 
                 self.current_repository = Some(repo);
                 self.repository_loading = false;
-                
-                self.add_notification(
-                    format!("Repository '{}' opened successfully", repo_name),
-                    NotificationType::Success,
-                    Some(3)
-                );
             }
             Err(e) => {
                 tracing::error!("Failed to open repository: {}", e);
@@ -2052,10 +2063,18 @@ impl TwiggyApp {
                         ui.colored_label(egui::Color32::YELLOW, "Branch: Detached HEAD");
                     }
                     
-                    match repo.commit_count() {
-                        Ok(count) => ui.label(format!("Commits: {}", count)),
-                        Err(_) => ui.colored_label(egui::Color32::GRAY, "Commits: Unable to count"),
-                    };
+                    ui.label(format!("Commits: {} loaded", repo.commit_count()));
+                    ui.label(format!("Cache: {} commits", repo.cache_size()));
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Refresh Commits").clicked() {
+                            tracing::info!("Manual commit refresh requested");
+                        }
+                        
+                        if ui.button("Load More").clicked() {
+                            tracing::info!("Load more commits requested");
+                        }
+                    });
                 });
             });
         } else if self.repository_loading {
