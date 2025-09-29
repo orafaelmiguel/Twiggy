@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer};
+use crate::{config::{AppConfig, ThemeType}, error::{Result, TwiggyError}, log_error, logging::{log_performance, log_memory_usage}, ui::components::log_viewer::LogViewer, git::repository::{GitRepository, discover_repository, validate_repository_path}};
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -1729,11 +1729,98 @@ impl TwiggyApp {
     }
 
     fn open_repository(&mut self) {
-        self.add_notification(
-            "Repository opening functionality will be implemented in future phases".to_string(),
-            NotificationType::Info,
-            Some(3),
-        );
+        tracing::info!("Opening repository dialog");
+        
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Select Git Repository")
+            .set_directory(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+            .pick_folder()
+        {
+            tracing::debug!("User selected path: {}", path.display());
+            
+            match validate_repository_path(&path) {
+                Ok(true) => {
+                    tracing::debug!("Path validation successful");
+                    
+                    match discover_repository(&path) {
+                        Ok(Some(repo_path)) => {
+                            tracing::info!("Repository discovered at: {}", repo_path.display());
+                            
+                            match GitRepository::detect(&repo_path) {
+                                Ok(Some(git_repo)) => {
+                                    match git_repo.validate() {
+                                        Ok(health) => {
+                                            let health_msg = match health {
+                                                crate::git::repository::RepositoryHealth::Healthy => "Repository is healthy and ready to use".to_string(),
+                                                crate::git::repository::RepositoryHealth::InOperation(op) => format!("Repository is currently in {} operation", op),
+                                                crate::git::repository::RepositoryHealth::Corrupted => "Repository appears to be corrupted".to_string(),
+                                                crate::git::repository::RepositoryHealth::Unknown => "Repository health status is unknown".to_string(),
+                                            };
+                                            
+                                            let repo_type_msg = match git_repo.repo_type() {
+                                                crate::git::repository::RepositoryType::Normal => "normal",
+                                                crate::git::repository::RepositoryType::Bare => "bare",
+                                                crate::git::repository::RepositoryType::Worktree => "worktree",
+                                            };
+                                            
+                                            tracing::info!("Repository opened successfully: {} repository at {}", repo_type_msg, repo_path.display());
+                                            
+                                            self.add_notification(
+                                                format!("Git repository detected: {} repository\n{}", repo_type_msg, health_msg),
+                                                NotificationType::Success,
+                                                Some(5),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Repository validation failed: {}", e);
+                                            self.handle_error(e);
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    tracing::warn!("No Git repository found at selected path");
+                                    self.add_notification(
+                                        "No Git repository found at the selected location".to_string(),
+                                        NotificationType::Warning,
+                                        Some(4),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("Repository detection failed: {}", e);
+                                    self.handle_error(e);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!("No Git repository discovered from selected path");
+                            self.add_notification(
+                                "Selected directory is not part of a Git repository".to_string(),
+                                NotificationType::Warning,
+                                Some(4),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Repository discovery failed: {}", e);
+                            self.handle_error(e);
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::warn!("Invalid repository path selected");
+                    self.add_notification(
+                        "Selected path is not accessible or does not exist".to_string(),
+                        NotificationType::Error,
+                        Some(4),
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Path validation failed: {}", e);
+                    self.handle_error(e);
+                }
+            }
+        } else {
+            tracing::debug!("Repository selection cancelled by user");
+        }
     }
 
     fn toggle_theme(&mut self) {
